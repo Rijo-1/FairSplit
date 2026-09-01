@@ -33,6 +33,13 @@ async def extract_bill(file: UploadFile = File(...)):
         )
 
     contents = await file.read()
+    logger.info(
+        "Bill extraction upload received: filename=%s content_type=%s bytes=%d request_id=%s",
+        file.filename,
+        file.content_type,
+        len(contents),
+        request_id,
+    )
     if len(contents) > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=400,

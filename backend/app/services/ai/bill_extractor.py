@@ -56,6 +56,13 @@ class BillExtractor:
                 code="AI_NOT_CONFIGURED",
             )
 
+        logger.info(
+            "Starting bill extraction: bytes=%d mime_type=%s model=%s",
+            len(image_bytes),
+            mime_type,
+            self.model,
+        )
+
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         data_uri = f"data:{mime_type};base64,{b64}"
 
@@ -72,8 +79,22 @@ class BillExtractor:
                 return bill
             except (ValidationError, json.JSONDecodeError, BillExtractionError) as e:
                 last_error = str(e)
-                logger.warning("Extraction attempt %d failed: %s", attempt + 1, last_error)
+                logger.warning(
+                    "Bill extraction attempt %d/%d failed: type=%s message=%s",
+                    attempt + 1,
+                    self.max_retries + 1,
+                    type(e).__name__,
+                    last_error,
+                    exc_info=True,
+                )
                 if attempt == self.max_retries:
+                    logger.error(
+                        "Bill extraction failed after %d attempts; model=%s mime_type=%s bytes=%d",
+                        self.max_retries + 1,
+                        self.model,
+                        mime_type,
+                        len(image_bytes),
+                    )
                     raise BillExtractionError(
                         "We couldn't read this bill clearly. Please try again with a clearer photo.",
                     ) from e
@@ -81,24 +102,44 @@ class BillExtractor:
         raise BillExtractionError("We couldn't read this bill clearly.")
 
     async def _call_groq(self, data_uri: str, user_prompt: str) -> dict:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_prompt},
-                        {"type": "image_url", "image_url": {"url": data_uri}},
-                    ],
-                },
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-            max_tokens=4096,
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_prompt},
+                            {"type": "image_url", "image_url": {"url": data_uri}},
+                        ],
+                    },
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=4096,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Groq request failed: type=%s model=%s",
+                type(exc).__name__,
+                self.model,
+            )
+            raise BillExtractionError(
+                "The AI bill-reading service could not process this image.",
+                code="AI_PROVIDER_ERROR",
+            ) from exc
         content = response.choices[0].message.content or "{}"
-        return json.loads(content)
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Groq returned invalid JSON: model=%s response_chars=%d",
+                self.model,
+                len(content),
+                exc_info=True,
+            )
+            raise
 
     def _parse_and_validate(self, raw: dict) -> ExtractedBillSchema:
         bill_data = raw.get("bill", raw)
